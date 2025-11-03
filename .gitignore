@@ -1,0 +1,18 @@
+# macOS system files
+.DS_Store
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Raw Yelp dataset
+yelp_dataset/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+yelp_dataset/
+yelp_reviews.parquet
+embedders/embeddings/*.npy
+.env
+embedders/.env
