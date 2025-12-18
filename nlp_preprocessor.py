@@ -58,3 +58,20 @@ def text_preprocessor(text):
     # Collapse whitespace
     return re.sub(r'\s+', ' ', clean_txt).strip()
 
+def denoise_reviews(df, X_white, min_words=6, dup_thresh=0.985):
+
+    # Filter short reviews
+    mask_len = df["text_cleaned"].str.split().str.len() >= min_words
+
+    df = df[mask_len].reset_index(drop=True)
+    X_white = X_white[mask_len.values]
+
+    # Remove near-duplicates
+    sim = cosine_similarity(X_white)
+    np.fill_diagonal(sim, 0)
+
+    dup_mask = (sim > dup_thresh).any(axis=1)
+    keep = ~dup_mask
+
+    return df[keep].reset_index(drop=True), X_white[keep]
+
