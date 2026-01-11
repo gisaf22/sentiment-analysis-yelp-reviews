@@ -1,18 +1,52 @@
-# macOS system files
+# Data files
+data/raw/
+data/embeddings/
+data/processed/
+*.json
+*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
 
-# Jupyter checkpoints
-.ipynb_checkpoints/
-
-# Raw Yelp dataset
-yelp_dataset/
-
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-yelp_dataset/
-yelp_reviews.parquet
-embedders/embeddings/*.npy
+# Environment - NEVER commit actual secrets
 .env
-embedders/.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.log
