@@ -1,241 +1,248 @@
 # theme_discovery_engine.py
+from __future__ import annotations
 
 import numpy as np
 from collections import Counter
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
+
 import spacy
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import NMF
 
+# ==============================
+# Configuration
+# ==============================
+
+@dataclass
+class ThemeDiscoveryConfig:
+    """
+    Configuration for lexical theme description.
+
+    This engine assumes semantic clusters already exist.
+    It provides contrastive lexical explanations using GLOBAL TF-IDF.
+    """
+    n_top_words: int = 10
+
+    # TF-IDF controls
+    max_features: int = 3000
+    min_df: int = 15
+    max_df: float = 0.80
+    sublinear_tf: bool = True
+
+    # Automatic generic-term suppression
+    auto_stopwords: bool = True
+    auto_stopwords_df_frac: float = 0.25
+    auto_stopwords_max_terms: int = 60
+    auto_stopwords_min_len: int = 3
+
+    preserve_negation: bool = True
+    token_pattern: str = r"(?u)\b[a-zA-Z_]{2,}\b"
+
+    # Surface text extraction
+    spacy_model: str = "en_core_web_sm"
+    n_repr_docs: int = 5
+    n_example_docs: int = 3
+
+    min_docs: int = 10
+
+
+# ==============================
+# Engine
+# ==============================
 
 class ThemeDiscoveryEngine:
     """
-    Deterministic discovery of customer themes within a business context.
+    Lexical theme description engine.
 
-    Pipeline:
-        texts
-          → TF-IDF
-          → NMF topics
-          → representative documents
-          → theme-specific noun phrases
+    Lifecycle (IMPORTANT):
+      1) fit_global_tfidf(all_texts)
+      2) describe_cluster(cluster_texts)
+
+    This separation enforces:
+      - global IDF (contrastive signal)
+      - local TF (cluster-specific salience)
     """
 
-    def __init__(self, n_topics=3, n_top_words=10, max_features=3000, min_df=2, max_df=0.95, random_state=42):
-        self.n_topics = n_topics
-        self.n_top_words = n_top_words
-        self.max_features = max_features
-        self.min_df = min_df
-        self.max_df = max_df
-        self.random_state = random_state
+    def __init__(self, **kwargs):
+        self.cfg = ThemeDiscoveryConfig(**kwargs)
 
-        # Required for noun_chunks
-        self.nlp = spacy.load("en_core_web_sm", disable=["ner"])
+        # stopwords
+        self.negators = {"not", "no", "nor", "never"}
+        self.stop_words = self._build_base_stop_words()
+        self.last_auto_stopwords_: List[str] = []
+
+        # TF-IDF state
+        self._vectorizer: Optional[TfidfVectorizer] = None
+        self._feature_names: Optional[np.ndarray] = None
+
+        # spaCy
+        self._nlp = None
 
     # ==============================================================
-    # PUBLIC API
+    # GLOBAL FIT (IDF)
     # ==============================================================
 
-    def discover(self, texts_for_modeling, texts_for_display):
+    def fit_global_tfidf(self, texts_for_modeling: List[str]) -> None:
         """
-        Discover themes inside a single semantic context.
-    
-        Parameters:
-            texts_for_modeling : List[str]
-                Lemmatized texts used for TF-IDF + NMF
-            texts_for_display : List[str]
-                Clean or raw texts used for noun phrases and examples
-    
-        Returns:
-            {
-                "themes": [
-                    {
-                        "theme_id": int,
-                        "terms": List[str],
-                        "noun_phrases": List[str],
-                        "examples": List[str]
-                    }
-                ]
-            }
+        Fit GLOBAL TF-IDF.
+
+        Must be called once before describing clusters.
         """
-    
-        # --------------------------------------------------
-        # Guard: not enough data
-        # --------------------------------------------------
-        if len(texts_for_modeling) < 10:
-            return {"themes": []}
-    
-        # --------------------------------------------------
-        # 1. TF-IDF (LEXICAL, LEMMATIZED)
-        # --------------------------------------------------
-        tfidf, feature_names = self._build_tfidf(texts_for_modeling)
-    
-        # --------------------------------------------------
-        # 2. NMF (TOPIC DISCOVERY)
-        # --------------------------------------------------
-        W, H = self._fit_nmf(tfidf)
-        if W is None or H is None:
-            return {"themes": []}
-    
-        themes = []
-    
-        # --------------------------------------------------
-        # 3. Extract themes
-        # --------------------------------------------------
-        for topic_id in range(H.shape[0]):
-    
-            # Top discriminative words for this topic
-            terms = self._top_terms(H, feature_names, topic_id)
-    
-            # Indices of documents most associated with this topic
-            top_doc_idx = np.argsort(W[:, topic_id])[-5:]
-    
-            # Human-readable texts (NOT lemmatized)
-            theme_texts = [texts_for_display[i] for i in top_doc_idx]
-    
-            # Linguistic noun phrases from surface text
-            noun_phrases = self.extract_noun_phrases(
-                theme_texts,
-                limit=10
-            )
-    
-            themes.append({
-                "theme_id": topic_id,
-                "terms": terms,
-                "noun_phrases": noun_phrases,
-                "examples": theme_texts[:3],
-            })
-    
-        return {"themes": themes}
+        if len(texts_for_modeling) < self.cfg.min_docs:
+            raise ValueError("Not enough documents to fit global TF-IDF.")
 
+        self._vectorizer, self._feature_names = self._fit_tfidf_vectorizer(texts_for_modeling)
 
     # ==============================================================
-    # TF-IDF (Lexical Signal Extraction)
-    #
-    # - Build a corpus-level vocabulary from all documents
-    # - Keep up to `max_features` most discriminative terms (by TF-IDF)
-    # - Term must appear in at least `min_df` documents
-    # - Term must appear in no more than `max_df` fraction of documents
-    # - Tokens must be alphabetic and length >= 3 characters
-    # - Remove English stop words
-    #
-    # Purpose:
-    #   Retain words that are frequent enough to matter,
-    #   rare enough to be informative,
-    #   and suitable for interpretable theme discovery.
-    #
-    # Words like
-    # “the”, “food”, “place”, “good”
-    # → appear everywhere → not discriminative
-    #
-    # Words like
-    # “chargrilled”, “gumbo”, “wait line”, “raw oysters”
-    # → appear frequently in some reviews but not others
-    # → highly discriminative
-    #   
-    # These words help answer:
-    #  
-    # “What is this review specifically about?”
+    # CLUSTER DESCRIPTION
     # ==============================================================
 
-    def _build_tfidf(self, texts):
-        min_df = min(self.min_df, max(1, int(0.01 * len(texts))))
-
-        vectorizer = TfidfVectorizer(
-            stop_words="english",
-            min_df=min_df,
-            max_df=self.max_df,
-            max_features=self.max_features,
-            token_pattern=r"(?u)\b[a-zA-Z]{3,}\b",
-        )
-
-        tfidf = vectorizer.fit_transform(texts)
-        return tfidf, vectorizer.get_feature_names_out()
-
-    # ==============================================================
-    # NMF
-    # ==============================================================
-
-    def _fit_nmf(self, tfidf):
-        n_topics = min(self.n_topics, tfidf.shape[0] - 1)
-        if n_topics <= 0:
-            return None, None
-
-        nmf = NMF(
-            n_components=n_topics,
-            init="nndsvd",
-            random_state=self.random_state,
-            max_iter=500,
-        )
-
-        W = nmf.fit_transform(tfidf)
-        H = nmf.components_
-
-        return W, H
-
-    # ==============================================================
-    # THEME COMPONENTS
-    # ==============================================================
-
-    def _top_terms(self, H, feature_names, topic_id):
+    def describe_cluster(
+        self,
+        texts_for_modeling: List[str],
+        texts_for_display: List[str],
+    ) -> Dict[str, Any]:
         """
-        Return top n_terms that best describe a topic/component in the H matrix
+        Produce lexical explanation for ONE semantic cluster.
         """
-        weights = H[topic_id]
-        top_idx = weights.argsort()[-self.n_top_words:][::-1]
-        return [feature_names[i] for i in top_idx]
+        self._validate_inputs(texts_for_modeling, texts_for_display)
 
-    def _top_documents(self, W, texts, topic_id, n_docs=5):
-        """
-        Return the top n_docs representative for a topic
-        """
-        top_idx = np.argsort(W[:, topic_id])[-n_docs:]
-        return [texts[i] for i in top_idx]
+        if self._vectorizer is None:
+            raise RuntimeError("Global TF-IDF not fit. Call fit_global_tfidf first.")
 
-    # ==============================================================
-    # NOUN PHRASES
-    # ==============================================================
+        X = self._vectorizer.transform(texts_for_modeling)
 
-    def extract_noun_phrases(self, texts, limit=20, max_doc_frac=0.5):
-        """
-        Extract informative noun phrases using linguistic + DF filtering.
-        """
-        phrase_counts = Counter()
-        doc_freq = Counter()
+        centroid = np.asarray(X.mean(axis=0)).ravel()
+        terms = self._rank_terms_by_cluster_centroid(centroid)
 
-        for text in texts:
-            doc = self.nlp(text)
+        repr_idx = self._select_representative_docs(X)
+        repr_texts = [texts_for_display[i] for i in repr_idx]
 
-            # Ensures each phrase is counted once per document
-            # Prevents long rants from dominating phrase importance
-            seen = set()
+        noun_phrases = self._extract_noun_phrases(repr_texts)
 
-            # For each review's noun chunks
-            for chunk in doc.noun_chunks:
-
-                # ignore chunks that are just one word, belong to tfidf
-                if len(chunk) < 2:
-                    continue
-
-                # ignore chunk if all words are stop words
-                if all(tok.is_stop for tok in chunk):
-                    continue
-
-                # enforce chunk to start with NOUN or PROPNOUN    
-                if chunk.root.pos_ not in {"NOUN", "PROPN"}:
-                    continue
-
-                phrase = chunk.text.lower().strip()
-                seen.add(phrase)
-
-            phrase_counts.update(seen)
-            doc_freq.update(seen)
-
-        n_docs = len(texts)
-
-        filtered = {
-            p: c
-            for p, c in phrase_counts.items()
-            if doc_freq[p] / n_docs <= max_doc_frac
+        return {
+            "terms": terms,
+            "noun_phrases": noun_phrases,
+            "examples": repr_texts[: self.cfg.n_example_docs],
         }
 
-        return [p for p, _ in Counter(filtered).most_common(limit)]
+    # ==============================================================
+    # TF-IDF internals
+    # ==============================================================
+
+    def _fit_tfidf_vectorizer(self, texts: List[str]) -> Tuple[TfidfVectorizer, np.ndarray]:
+        stop_words = self.stop_words
+        self.last_auto_stopwords_ = []
+
+        if self.cfg.auto_stopwords:
+            learned = self._learn_auto_stopwords(texts, stop_words)
+            if learned:
+                stop_words = sorted(set(stop_words) | set(learned))
+                self.last_auto_stopwords_ = learned
+
+        vectorizer = TfidfVectorizer(
+            stop_words=stop_words,
+            min_df=max(1, min(self.cfg.min_df, len(texts))),
+            max_df=self.cfg.max_df,
+            max_features=self.cfg.max_features,
+            token_pattern=self.cfg.token_pattern,
+            lowercase=True,
+            sublinear_tf=self.cfg.sublinear_tf,
+        )
+        vectorizer.fit(texts)
+        return vectorizer, vectorizer.get_feature_names_out()
+
+    def _rank_terms_by_cluster_centroid(self, centroid: np.ndarray) -> List[str]:
+        if np.allclose(centroid, 0):
+            return []
+
+        idx = np.argsort(centroid)[-self.cfg.n_top_words:][::-1]
+        return [self._feature_names[i] for i in idx if centroid[i] > 0]
+
+    def _select_representative_docs(self, X) -> np.ndarray:
+        strength = np.asarray(X.sum(axis=1)).ravel()
+        n = min(self.cfg.n_repr_docs, len(strength))
+        return np.argsort(strength)[-n:]
+
+    # ==============================================================
+    # Auto stopwords
+    # ==============================================================
+
+    def _learn_auto_stopwords(self, texts: List[str], base_stop_words: List[str]) -> List[str]:
+        probe = TfidfVectorizer(
+            stop_words=base_stop_words,
+            min_df=1,
+            max_df=1.0,
+            max_features=self.cfg.max_features,
+            token_pattern=self.cfg.token_pattern,
+            lowercase=True,
+        )
+        X = probe.fit_transform(texts)
+        feats = probe.get_feature_names_out()
+
+        df = np.asarray((X > 0).sum(axis=0)).ravel()
+        frac = df / max(1, X.shape[0])
+
+        idx = np.where(frac >= self.cfg.auto_stopwords_df_frac)[0]
+        terms = []
+        for i in idx:
+            t = feats[i]
+            if len(t) < self.cfg.auto_stopwords_min_len:
+                continue
+            if self.cfg.preserve_negation and t in self.negators:
+                continue
+            terms.append((t, frac[i]))
+
+        terms.sort(key=lambda x: x[1], reverse=True)
+        return [t for t, _ in terms[: self.cfg.auto_stopwords_max_terms]]
+
+    # ==============================================================
+    # Validation
+    # ==============================================================
+
+    def _validate_inputs(self, texts_for_modeling, texts_for_display):
+        if len(texts_for_modeling) != len(texts_for_display):
+            raise ValueError("Modeling and display texts must align.")
+        if len(texts_for_modeling) < self.cfg.min_docs:
+            raise ValueError("Too few documents in cluster.")
+
+    def _build_base_stop_words(self) -> List[str]:
+        base = set(ENGLISH_STOP_WORDS)
+        if self.cfg.preserve_negation:
+            base -= self.negators
+        return sorted(base)
+
+    # ==============================================================
+    # Noun phrase extraction
+    # ==============================================================
+
+    @property
+    def nlp(self):
+        if self._nlp is None:
+            self._nlp = spacy.load(self.cfg.spacy_model, disable=["ner"])
+        return self._nlp
+
+    def _extract_noun_phrases(self, texts: List[str]) -> List[str]:
+        counts = Counter()
+        doc_freq = Counter()
+    
+        for text in texts:
+            seen = set()
+            doc = self.nlp(text)
+            for chunk in doc.noun_chunks:
+                if len(chunk) < 2:
+                    continue
+                if all(tok.is_stop for tok in chunk):
+                    continue
+                phrase = chunk.text.lower()
+                counts[phrase] += 1
+                seen.add(phrase)
+            doc_freq.update(seen)
+    
+        max_df = 0.8 * len(texts)
+        return [
+            p for p, _ in counts.most_common(10)
+            if doc_freq[p] <= max_df
+        ]
+

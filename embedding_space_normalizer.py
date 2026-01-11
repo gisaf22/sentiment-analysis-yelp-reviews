@@ -43,7 +43,7 @@ class EmbeddingSpaceNormalizer:
         Apply same transformation to new data
         """
         # Mean centering
-        X_centered = self.scaler.fit_transform(X)
+        X_centered = self.scaler.transform(X)
         return self.pca.transform(X_centered)
 
     def variance_retained(self):
