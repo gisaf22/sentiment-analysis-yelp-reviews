@@ -24,13 +24,9 @@
 
 ## 🔍 The Problem
 
-Business owners are overwhelmed by customer reviews. A popular business can receive **thousands of reviews** on Yelp, each containing valuable insights about:
-- What customers love
-- Pain points and complaints
-- Service quality issues
-- Product/menu feedback
+Small and medium-sized businesses receive large volumes of customer feedback across channels such as Yelp, surveys, and social media, but often lack effective tools to extract structured, actionable insights. Although this feedback contains valuable information about customer preferences and pain points, it is largely unstructured, making it difficult to identify recurring themes and understand how customer concerns change over time.
 
-**Manually reading and categorizing these reviews is impractical.**
+**This project designs and implements an NLP system that analyzes Yelp reviews to identify recurring customer experience themes for a business and track how those themes evolve over time.**
 
 ### Key Challenges
 
@@ -40,7 +36,7 @@ Business owners are overwhelmed by customer reviews. A popular business can rece
 | 📝 Unstructured | Free-form natural language |
 | 🎭 Mixed Sentiment | Single reviews contain both praise and complaints |
 | 🌐 Noise | Foreign language, off-topic content |
-| 🏷️ Interpretation | Raw data needs actionable labels |
+| ⏱️ Temporal | Understanding how themes evolve over time |
 
 ---
 
@@ -74,24 +70,26 @@ For any business, the pipeline generates:
 
 ### Case Study: Datz Restaurant (Tampa, FL)
 
-We ran the pipeline on a restaurant with 3,388 reviews to demonstrate its capabilities.
+The system is applied to Yelp reviews for Datz Restaurant in Tampa, Florida, using approximately 3,300 reviews collected over a **13-year period from 2009 to 2022**.
 
 | Metric | Value |
 |--------|-------|
-| Reviews Analyzed | 3,388 |
+| Reviews Analyzed | 3,364 |
+| Time Span | 2009-2022 (13 years) |
 | Themes Discovered | 10 |
-| Processing Time | ~45 seconds |
+| Inter-Centroid Separation | 0.61 |
 | Main Context Coverage | 99.3% |
 
 ### Discovered Themes
 
 | # | Theme | Reviews | Key Insight |
 |---|-------|---------|-------------|
-| 1 | Food Quality & Menu Variety | 953 | Diverse menu praised, but execution inconsistent |
-| 2 | Service Experience | 574 | Trendy atmosphere, but slow service |
-| 3 | Unique Dining Experience | 471 | Signature items are customer favorites |
-| 4 | Innovative Menu | 457 | Creative dishes attract customers |
-| 5 | Brunch Experience | 273 | Popular but has quality issues |
+| 1 | Mixed Reactions to Food Quality and Service | 953 | Diverse menu praised, but execution inconsistent |
+| 2 | Food Quality and Service Experience | 574 | Trendy atmosphere, mixed service reliability |
+| 3 | Datz: A Culinary Gem in South Tampa | 471 | Signature items are customer favorites |
+| 4 | Positive Dining Experience | 457 | Great atmosphere and service praised |
+| 5 | Brunch Delight at Datz | 273 | Popular brunch with wait times and signature items |
+| 6 | Service Inconsistency and Wait Times | 181 | Mixed experiences with service reliability |
 
 ### Sample Output
 
@@ -122,8 +120,8 @@ We ran the pipeline on a restaurant with 3,388 reviews to demonstrate its capabi
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/sentiment-analysis-yelp.git
-cd sentiment-analysis-yelp
+git clone https://github.com/gisaf22/sentiment-analysis-yelp-reviews.git
+cd sentiment-analysis-yelp-reviews
 
 # Create virtual environment
 python -m venv .venv
@@ -268,6 +266,14 @@ sentiment-analysis-yelp/
 
 ## 📊 Model Performance
 
+### Evaluation Methodology
+
+Because this project uses **unsupervised semantic clustering**, no ground-truth labels are available for traditional train–test evaluation. Model quality is assessed using **internal validation metrics**:
+
+- **Inter-centroid cosine separation** (0.61 at k=10) — evaluates theme distinctiveness
+- **Cluster count selection** via elbow method
+- **Human evaluation** of LLM-generated labels for interpretability, actionability, and semantic distinctiveness
+
 ### Typical Results
 
 | Metric | Typical Range |
@@ -275,7 +281,7 @@ sentiment-analysis-yelp/
 | Main Context Coverage | 95-99% |
 | Themes Discovered | 6-14 |
 | Min Theme Size | 50+ reviews |
-| Processing Time | 30-60 seconds |
+| Inter-Centroid Separation | 0.55-0.70 |
 
 ### Processing Time Breakdown
 
@@ -323,10 +329,16 @@ Each theme includes:
 
 ## 🔮 Future Work
 
-- [ ] **Temporal Analysis**: Track theme evolution over time
+### Key Observation
+
+Individual customer reviews often contain multiple themes, which can dilute clustering performance when reviews are treated as the unit of analysis. While review-level clustering is effective for discovering broad thematic structure, **future iterations will adopt sentence-level modeling** to improve thematic precision.
+
+### Roadmap
+
+- [x] **Temporal Analysis**: Track theme evolution over time ✓
+- [ ] **Sentence-Level Modeling**: Segment reviews before clustering for improved precision
 - [ ] **Sentiment Scoring**: Correlate themes with star ratings
 - [ ] **Comparative Analysis**: Compare across similar businesses
-- [ ] **Real-time Processing**: Stream new reviews as they arrive
 - [ ] **Web Dashboard**: Interactive UI for business owners
 - [ ] **Multi-language Support**: Analyze non-English reviews
 
@@ -386,8 +398,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Safari Gisa**
 
-- GitHub: [@yourusername](https://github.com/yourusername)
-- LinkedIn: [Your LinkedIn](https://linkedin.com/in/yourprofile)
+- GitHub: [@gisaf22](https://github.com/gisaf22)
+- LinkedIn: [Safari Gisa](https://linkedin.com/in/safarigisa)
 
 ---
 
