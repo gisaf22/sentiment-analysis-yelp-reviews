@@ -1,12 +1,11 @@
 import pandas as pd
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+import pyarrow.parquet as pq
 
 
 class BusinessReviewLoader:
     """
-    Loads Yelp businesses using pandas, and large Yelp reviews using Spark.
-    Filters reviews by business safely before converting to pandas.
+    Loads Yelp businesses using pandas.
+    Loads reviews using PyArrow with pushdown predicate filtering.
     """
 
     def __init__(
@@ -21,19 +20,12 @@ class BusinessReviewLoader:
         self.id_col = id_col
         self.name_col = name_col
         self.text_col = text_col
+        self.reviews_path = reviews_path
 
         # --- Load businesses in pandas (small table) ---
         self.business_df = self._load_pandas_file(business_path)
 
-        # --- Start Spark ---
-        self.spark = SparkSession.builder \
-            .appName("YelpReviewLoader") \
-            .config("spark.driver.memory", spark_driver_memory) \
-            .getOrCreate()
-
-        # --- Load reviews in Spark (large table) ---
-        self.reviews_df = self._load_spark_file(reviews_path)
-
+        # Don't load full reviews here - load on demand per business with predicate pushdown
         self._validate_columns()
 
     # ------------------------------------------------------------------
@@ -48,12 +40,7 @@ class BusinessReviewLoader:
         elif path.endswith(".json"):
             return pd.read_json(path, lines=True)
         else:
-            raise ValueError("Business file must be .parquet, .csv, or .json")
-
-    def _load_spark_file(self, path):
-        if not path.endswith(".parquet"):
-            raise ValueError("Spark reviews loader requires PARQUET file")
-        return self.spark.read.parquet(path)
+            raise ValueError("File must be .parquet, .csv, or .json")
 
     # ------------------------------------------------------------------
     # VALIDATION
@@ -63,14 +50,8 @@ class BusinessReviewLoader:
         if self.id_col not in self.business_df.columns:
             raise ValueError(f"{self.id_col} missing from business file")
 
-        if self.id_col not in self.reviews_df.columns:
-            raise ValueError(f"{self.id_col} missing from reviews parquet")
-
         if self.name_col not in self.business_df.columns:
             raise ValueError(f"{self.name_col} missing from business file")
-
-        if self.text_col not in self.reviews_df.columns:
-            raise ValueError(f"{self.text_col} missing from reviews parquet")
 
     # ------------------------------------------------------------------
     # BUSINESS LOOKUP
@@ -105,8 +86,8 @@ class BusinessReviewLoader:
         chosen = matches.iloc[0]
         business_id = chosen[self.id_col]
 
-        # --- Explicit verification (no silent mismatch ever again) ---
-        print("\n Selected Business:")
+        # --- Explicit verification ---
+        print("\nSelected Business:")
         for col in [self.id_col, self.name_col, "city", "state", "review_count", "is_open"]:
             if col in chosen:
                 print(f"{col}: {chosen[col]}")
@@ -114,18 +95,28 @@ class BusinessReviewLoader:
         return self.get_reviews_by_business_id(business_id)
 
     # ------------------------------------------------------------------
-    # REVIEW EXTRACTION (SAFE SPARK FILTER → PANDAS)
+    # REVIEW EXTRACTION (PYARROW PUSHDOWN PREDICATE FILTERING)
     # ------------------------------------------------------------------
 
     def get_reviews_by_business_id(self, business_id):
-        spark_filtered = self.reviews_df.filter(
-            col(self.id_col) == business_id
-        )
+        """
+        Load only reviews for this business using PyArrow pushdown predicates.
+        Filter is applied at the parquet file level - only matching row groups loaded.
+        This is the most efficient approach for large parquet files.
+        """
+        # Use filters parameter for predicate pushdown with read_table
+        # PyArrow uses row group metadata to skip non-matching row groups
+        
+        # Build filter: [[(column, operator, value)]]
+        # Double-nested list required for proper OR/AND logic
+        filters = [[(self.id_col, '==', business_id)]]
+        
+        # Read with pushdown predicate - only matching row groups loaded from disk
+        table = pq.read_table(self.reviews_path, filters=filters)
+        
+        # Convert to pandas
+        df = table.to_pandas()
+        
+        return df.reset_index(drop=True)
 
-        pdf = spark_filtered.toPandas()
-
-        # IMPORTANT: stop Spark immediately after conversion
-        self.spark.stop()
-
-        return pdf
 

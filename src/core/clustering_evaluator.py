@@ -62,6 +62,65 @@ class ClusteringEvaluator:
 
         return pd.DataFrame(results)
 
+    def find_elbow_k(
+        self,
+        X_raw,
+        X_cluster,
+        k_range,
+        method="kmeans",
+        linkage="average",
+        metric="cosine",
+    ):
+        """
+        Find optimal k using elbow method on inter-centroid cosine distance.
+        
+        Uses the "maximum distance from line" approach to detect the elbow point
+        where adding more clusters yields diminishing returns.
+        
+        Parameters:
+        -----------
+        X_raw : np.ndarray
+            Raw embeddings for metric computation
+        X_cluster : np.ndarray
+            Normalized embeddings for clustering
+        k_range : range or list
+            Range of k values to evaluate
+        method : str
+            Clustering method ("kmeans" or "agglo")
+            
+        Returns:
+        --------
+        int : Optimal k value
+        """
+        results = self.probe_k_range(
+            X_raw=X_raw,
+            X_cluster=X_cluster,
+            k_values=k_range,
+            method=method,
+            linkage=linkage,
+            metric=metric,
+        )
+        
+        k = np.array(results["k"])
+        y = np.array(results["inter_centroid_cosine"])
+        
+        # Normalize for elbow detection
+        k_norm = (k - k.min()) / (k.max() - k.min() + 1e-9)
+        y_norm = (y - y.min()) / (y.max() - y.min() + 1e-9)
+        
+        # Find point with max distance from line connecting endpoints
+        p1 = np.array([k_norm[0], y_norm[0]])
+        p2 = np.array([k_norm[-1], y_norm[-1]])
+        
+        distances = []
+        for i in range(len(k_norm)):
+            p = np.array([k_norm[i], y_norm[i]])
+            distance = np.abs(np.cross(p2 - p1, p1 - p)) / (np.linalg.norm(p2 - p1) + 1e-9)
+            distances.append(distance)
+        
+        elbow_k = k[np.argmax(distances)]
+        return int(elbow_k)
+
     # ------------------------------------------------------------------
     # CLUSTERING BACKENDS
     # ------------------------------------------------------------------
@@ -208,7 +267,89 @@ class ClusteringEvaluator:
             cluster_examples[int(cid)] = (
                 df.iloc[idx[top_idx]][text_col].tolist()
             )
-    
+
+        return cluster_examples
+
+
+    @staticmethod
+    def extract_representative_examples_diverse(
+        X_cluster,
+        df,
+        labels,
+        kmeans_model,
+        text_col="text_cleaned",
+        top_n=10,
+        n_closest=2,
+        boundary_percentile=80,
+    ):
+        """
+        Select representative examples using hybrid strategy:
+        1. Include n_closest reviews nearest to centroid (most typical)
+        2. Stratified sample from remaining reviews within safe boundary
+        
+        Parameters:
+        -----------
+        top_n : int
+            Total number of examples to select
+        n_closest : int  
+            Number of closest-to-centroid examples to always include
+        boundary_percentile : int
+            Only sample from reviews within this percentile of distance
+            (avoids outliers near cluster boundaries)
+        
+        Strategy:
+        ---------
+        - Reviews closest to centroid = "core" examples (typical)
+        - Reviews from middle distance = "edge" examples (variety)
+        - Excludes outer 20% to avoid boundary confusion
+        """
+        cluster_examples = {}
+        centroids = kmeans_model.cluster_centers_
+
+        for cid in np.unique(labels):
+            idx = np.where(labels == cid)[0]
+
+            if len(idx) == 0:
+                continue
+
+            cluster_vecs = X_cluster[idx]
+            centroid = centroids[cid].reshape(1, -1)
+
+            # Calculate similarities to centroid
+            sims = cosine_similarity(cluster_vecs, centroid).ravel()
+            sorted_order = np.argsort(sims)[::-1]  # highest similarity first
+
+            # Determine safe boundary (exclude outer reviews)
+            boundary_idx = int(len(sorted_order) * boundary_percentile / 100)
+            safe_indices = sorted_order[:boundary_idx]
+
+            if len(safe_indices) < top_n:
+                # Small cluster: just take what we have
+                selected = sorted_order[:top_n]
+            else:
+                # Select n_closest from top
+                closest = safe_indices[:n_closest]
+                
+                # Stratified sample from remaining safe zone
+                remaining_safe = safe_indices[n_closest:]
+                n_diverse = min(top_n - n_closest, len(remaining_safe))
+                
+                if n_diverse > 0 and len(remaining_safe) > 0:
+                    # Sample evenly across distance quantiles
+                    step = len(remaining_safe) // n_diverse
+                    if step == 0:
+                        step = 1
+                    diverse_picks = remaining_safe[::step][:n_diverse]
+                    selected = np.concatenate([closest, diverse_picks])
+                else:
+                    selected = closest
+
+            # Convert to original indices and get texts
+            original_idx = idx[selected]
+            cluster_examples[int(cid)] = (
+                df.iloc[original_idx][text_col].tolist()
+            )
+
         return cluster_examples
 
 

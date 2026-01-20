@@ -25,7 +25,7 @@ class ThemeLabeler:
     # ------------------------------------------------------------------
 
     def _build_prompt(self, cluster_id, terms, noun_phrases, examples):
-        examples_text = "\n---\n".join(examples[:3])
+        examples_text = "\n---\n".join(examples[:10])
 
         return dedent(f"""
         You are analyzing customer feedback that has already been grouped
@@ -68,10 +68,7 @@ class ThemeLabeler:
         {{
             "theme_name": "",
             "theme_category": "",
-            "summary": "",
-            "likes": [],
-            "dislikes": [],
-            "business_impact": ""
+            "summary": ""
         }}
         """).strip()
 

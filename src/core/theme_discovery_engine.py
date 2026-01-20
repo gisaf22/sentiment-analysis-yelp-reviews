@@ -41,8 +41,13 @@ class ThemeDiscoveryConfig:
 
     # Surface text extraction
     spacy_model: str = "en_core_web_sm"
-    n_repr_docs: int = 5
-    n_example_docs: int = 3
+    n_repr_docs: int = 15
+    n_example_docs: int = 10
+
+    # Diverse sampling strategy
+    sampling_strategy: str = "diverse"  # "closest" or "diverse"
+    n_closest: int = 2  # Number of closest-to-centroid examples (anchors)
+    boundary_percentile: int = 80  # Exclude outer 20% (near cluster boundaries)
 
     min_docs: int = 10
 
@@ -161,9 +166,64 @@ class ThemeDiscoveryEngine:
         return [self._feature_names[i] for i in idx if centroid[i] > 0]
 
     def _select_representative_docs(self, X) -> np.ndarray:
-        strength = np.asarray(X.sum(axis=1)).ravel()
-        n = min(self.cfg.n_repr_docs, len(strength))
-        return np.argsort(strength)[-n:]
+        """
+        Select representative documents using configured strategy.
+        
+        Strategies:
+        - "closest": Select docs with highest TF-IDF similarity to centroid
+        - "diverse": Hybrid approach - some closest + stratified sample from safe zone
+        """
+        n_docs = X.shape[0]
+        n = min(self.cfg.n_repr_docs, n_docs)
+        
+        if n_docs == 0:
+            return np.array([], dtype=int)
+        
+        # Calculate centroid similarity for each doc
+        centroid = np.asarray(X.mean(axis=0)).ravel()
+        
+        # Cosine similarity to centroid
+        X_dense = X.toarray() if hasattr(X, 'toarray') else X
+        norms = np.linalg.norm(X_dense, axis=1)
+        norms[norms == 0] = 1  # Avoid division by zero
+        centroid_norm = np.linalg.norm(centroid)
+        if centroid_norm == 0:
+            centroid_norm = 1
+        
+        sims = (X_dense @ centroid) / (norms * centroid_norm)
+        sorted_order = np.argsort(sims)[::-1]  # Highest similarity first
+        
+        if self.cfg.sampling_strategy == "closest":
+            # Original behavior: just pick closest to centroid
+            return sorted_order[:n]
+        
+        elif self.cfg.sampling_strategy == "diverse":
+            # Hybrid: closest + stratified from safe zone
+            boundary_idx = int(n_docs * self.cfg.boundary_percentile / 100)
+            safe_indices = sorted_order[:max(boundary_idx, n)]
+            
+            if len(safe_indices) <= n:
+                return safe_indices
+            
+            # Take n_closest from top
+            n_closest = min(self.cfg.n_closest, n)
+            closest = safe_indices[:n_closest]
+            
+            # Stratified sample from remaining safe zone
+            remaining_safe = safe_indices[n_closest:]
+            n_diverse = n - n_closest
+            
+            if n_diverse > 0 and len(remaining_safe) > 0:
+                step = max(1, len(remaining_safe) // n_diverse)
+                diverse_picks = remaining_safe[::step][:n_diverse]
+                return np.concatenate([closest, diverse_picks])
+            else:
+                return closest
+        
+        else:
+            # Fallback to TF-IDF strength (original behavior)
+            strength = np.asarray(X.sum(axis=1)).ravel()
+            return np.argsort(strength)[-n:]
 
     # ==============================================================
     # Auto stopwords
@@ -224,25 +284,100 @@ class ThemeDiscoveryEngine:
         return self._nlp
 
     def _extract_noun_phrases(self, texts: List[str]) -> List[str]:
+        """
+        Extract meaningful noun phrases from representative texts.
+        
+        Pipeline:
+        1. Parse texts with spaCy
+        2. Extract noun chunks
+        3. Clean each chunk (remove determiners, pronouns, etc.)
+        4. Rank by frequency, filter by document frequency
+        
+        Returns:
+            List of top 10 cleaned noun phrases
+        """
         counts = Counter()
         doc_freq = Counter()
     
         for text in texts:
-            seen = set()
-            doc = self.nlp(text)
-            for chunk in doc.noun_chunks:
-                if len(chunk) < 2:
-                    continue
-                if all(tok.is_stop for tok in chunk):
-                    continue
-                phrase = chunk.text.lower()
-                counts[phrase] += 1
-                seen.add(phrase)
-            doc_freq.update(seen)
+            phrases_in_doc = self._extract_phrases_from_text(text)
+            counts.update(phrases_in_doc)
+            doc_freq.update(set(phrases_in_doc))
     
-        max_df = 0.8 * len(texts)
+        return self._rank_and_filter_phrases(counts, doc_freq, n_texts=len(texts))
+    
+    def _extract_phrases_from_text(self, text: str) -> List[str]:
+        """Extract cleaned noun phrases from a single text."""
+        phrases = []
+        doc = self.nlp(text)
+        
+        for chunk in doc.noun_chunks:
+            cleaned = self._clean_noun_chunk(chunk)
+            if cleaned:
+                phrases.append(cleaned)
+        
+        return phrases
+    
+    def _clean_noun_chunk(self, chunk) -> Optional[str]:
+        """
+        Clean a spaCy noun chunk by removing uninformative tokens.
+        
+        Removes:
+        - Determiners (a, an, the)
+        - Pronouns (my, your, his, her, its, our, their)
+        - Demonstratives (this, that, these, those)
+        
+        Returns:
+            Cleaned phrase string, or None if invalid
+        """
+        # Skip very short chunks
+        if len(chunk) < 2:
+            return None
+            
+        # Skip if all tokens are stop words
+        if all(tok.is_stop for tok in chunk):
+            return None
+        
+        # Keep only meaningful POS tags
+        meaningful_pos = {"NOUN", "PROPN", "ADJ", "NUM"}
+        tokens = [tok for tok in chunk if tok.pos_ in meaningful_pos or not tok.is_stop]
+        
+        if len(tokens) < 2:
+            return None
+        
+        # Build phrase from remaining tokens
+        phrase = " ".join(tok.text.lower() for tok in tokens)
+        
+        # Final validation
+        if len(phrase) < 5:
+            return None
+            
+        return phrase
+    
+    def _rank_and_filter_phrases(
+        self, 
+        counts: Counter, 
+        doc_freq: Counter, 
+        n_texts: int,
+        top_n: int = 10,
+        max_df_ratio: float = 0.8
+    ) -> List[str]:
+        """
+        Rank phrases by frequency and filter out overly common ones.
+        
+        Args:
+            counts: Phrase frequency counts
+            doc_freq: Document frequency per phrase
+            n_texts: Total number of texts
+            top_n: Number of phrases to return
+            max_df_ratio: Max document frequency ratio (filter too-common phrases)
+        
+        Returns:
+            Top N filtered phrases
+        """
+        max_df = max_df_ratio * n_texts
         return [
-            p for p, _ in counts.most_common(10)
-            if doc_freq[p] <= max_df
+            phrase for phrase, _ in counts.most_common(top_n)
+            if doc_freq[phrase] <= max_df
         ]
 
